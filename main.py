@@ -59,25 +59,6 @@ print("Test features:", X_test.shape)
 print("Training targets:", y_train.shape)
 print("Test targets:", y_test.shape)
 
-# Create an initial second-degree polynomial model.
-# We will compare polynomial degrees using grid search later.
-model_poly = sf.create_polynomial_model(degree=2)
-
-# Fit the entire pipeline using only the training samples.
-# This learns both the scaling values and the regression coefficients.
-model_poly.fit(X_train, y_train)
-
-# Confirm the pipeline structure and successful training.
-print("\nPolynomial pipeline:")
-print(model_poly)
-print("\nModel training completed.")
-
-# Assess the initial polynomial model on unseen validation folds.
-# The held-out test set is not used during this comparison.
-cv_results_poly = sf.evaluate_cross_validation(
-    model_poly, X_train, y_train
-)
-
 # Compare polynomial complexity using the training data.
 # Keep the held-out test set for the final evaluation.
 model_gscv_poly, results_poly = sf.tune_polynomial_model(
@@ -103,7 +84,32 @@ print("\nModel comparison — cross-validation RMSE:")
 print(f"Polynomial: {-model_gscv_poly.best_score_:.4f} d^-1")
 print(f"KNN:        {-model_gscv_knn.best_score_:.4f} d^-1")
 
+# Evaluate the fixed candidates once on the held-out test set.
+# The degree-2 polynomial is the selected architecture, chosen from the
+# training and validation evidence above. The best KNN model is reported
+# only for comparison and is not used to revisit tuning or selection.
+sf.evaluate_final_models(
+    {
+        "Polynomial (selected)": model_gscv_poly,
+        "KNN (comparison only)": model_gscv_knn
+    },
+    X_train,
+    y_train,
+    X_test,
+    y_test,
+    project_folder
+)
+
 # Export tables and figures to support the model architecture comparison.
 sf.export_model_comparisons(
     results_poly, results_knn, project_folder
+)
+
+# Compare how the selected polynomial and KNN candidates respond
+# when one culture condition changes at a time.
+sf.plot_feature_effects(
+    model_gscv_poly,
+    model_gscv_knn,
+    X_train,
+    project_folder
 )

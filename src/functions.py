@@ -5,10 +5,10 @@
 from sklearn.linear_model import LinearRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler, PolynomialFeatures
-from sklearn.model_selection import cross_validate
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import GridSearchCV
 from sklearn.neighbors import KNeighborsRegressor
+from sklearn.metrics import mean_squared_error, r2_score
 import pandas as pd
 import numpy as np
 from matplotlib import pyplot as plt
@@ -51,46 +51,6 @@ def create_polynomial_model(degree):
 
     return model
 
-def evaluate_cross_validation(model, X_train, y_train):
-    # Evaluate the whole pipeline across five folds.
-    # Scaling and regression are fitted using only each fold's training samples.
-    cv_results = cross_validate(
-        model,
-        X_train,
-        y_train,
-        cv=5,
-        scoring=("neg_root_mean_squared_error", "r2"),
-        return_train_score=True
-    )
-
-    # Convert negative RMSE scores back to positive prediction errors.
-    # "test" in these result keys refers to validation folds, not our test set.
-    rmse_train = -cv_results["train_neg_root_mean_squared_error"]
-    rmse_valid = -cv_results["test_neg_root_mean_squared_error"]
-    r2_train = cv_results["train_r2"]
-    r2_valid = cv_results["test_r2"]
-
-    # Summarize average performance and variation across the five folds.
-    print("\nFive-fold cross-validation results:")
-    print(
-        f"Training   | RMSE: {np.mean(rmse_train):.4f}"
-        f" +/- {np.std(rmse_train):.4f} d^-1"
-    )
-    print(
-        f"Validation | RMSE: {np.mean(rmse_valid):.4f}"
-        f" +/- {np.std(rmse_valid):.4f} d^-1"
-    )
-    print(
-        f"Training   | R²:   {np.mean(r2_train):.4f}"
-        f" +/- {np.std(r2_train):.4f}"
-    )
-    print(
-        f"Validation | R²:   {np.mean(r2_valid):.4f}"
-        f" +/- {np.std(r2_valid):.4f}"
-    )
-
-    return cv_results
-
 def tune_polynomial_model(X_train, y_train, degrees, cv_folds):
     # Create the pipeline
     # Grid search will replace the initial degree with each candidate value.
@@ -116,11 +76,12 @@ def tune_polynomial_model(X_train, y_train, degrees, cv_folds):
 
     # Summarize the cross-validation results as positive RMSE values.
     results = pd.DataFrame(search.cv_results_)
-
+    # Grid search stores negative RMSE, so abs() converts it to positive RMSE
+    # and avoids a "-0.0" result when an error is exactly zero.
     summary = pd.DataFrame({
         "Degree": results["param_polynomialfeatures__degree"],
-        "Training RMSE": -results["mean_train_score"],
-        "Validation RMSE": -results["mean_test_score"],
+        "Training RMSE": results["mean_train_score"].abs(),
+        "Validation RMSE": results["mean_test_score"].abs(),
         "Validation SD": results["std_test_score"],
         "Rank": results["rank_test_score"]
     })
@@ -160,12 +121,13 @@ def tune_knn_model(X_train, y_train, neighbors, weights, cv_folds):
 
     # Convert the search results into a readable table with positive RMSE.
     results = pd.DataFrame(search.cv_results_)
-
+    # Grid search stores negative RMSE, so abs() converts it to positive RMSE
+    # and avoids a "-0.0" result when an error is exactly zero.
     summary = pd.DataFrame({
         "Neighbors": results["param_kneighborsregressor__n_neighbors"],
         "Weights": results["param_kneighborsregressor__weights"],
-        "Training RMSE": -results["mean_train_score"],
-        "Validation RMSE": -results["mean_test_score"],
+        "Training RMSE": results["mean_train_score"].abs(),
+        "Validation RMSE": results["mean_test_score"].abs(),
         "Validation SD": results["std_test_score"],
         "Rank": results["rank_test_score"]
     })
@@ -186,6 +148,48 @@ def tune_knn_model(X_train, y_train, neighbors, weights, cv_folds):
     print("Weights:", search.best_params_["kneighborsregressor__weights"])
 
     return search, summary
+
+def evaluate_final_models(models, X_train, y_train, X_test, y_test,
+                          project_folder):
+    # Score each fitted model once on the training and held-out test samples.
+    # Grid search has already refit each best model on all training samples.
+    tables_folder = project_folder / "tables"
+    tables_folder.mkdir(exist_ok=True)
+
+    rows = []
+
+    for name, model in models.items():
+        predictions_train = model.predict(X_train)
+        predictions_test = model.predict(X_test)
+
+        rows.append({
+            "Model": name,
+            "Training RMSE": np.sqrt(
+                mean_squared_error(y_train, predictions_train)
+            ),
+            "Test RMSE": np.sqrt(
+                mean_squared_error(y_test, predictions_test)
+            ),
+            "Training R2": r2_score(y_train, predictions_train),
+            "Test R2": r2_score(y_test, predictions_test),
+            # Counted over the test samples only.
+            "Negative test predictions": int((predictions_test < 0).sum())
+        })
+
+    summary = pd.DataFrame(rows)
+
+    print("\nFinal evaluation — RMSE in d^-1:")
+    print(
+        summary.to_string(
+            index=False,
+            float_format=lambda value: f"{value:.4f}"
+        )
+    )
+
+    summary.to_csv(tables_folder / "final_model_evaluation.csv", index=False)
+    print("\nFinal evaluation table saved in: tables/")
+
+    return summary
 
 def export_model_comparisons(results_poly, results_knn, project_folder):
     # Create output folders if they do not already exist.
@@ -256,5 +260,76 @@ def export_model_comparisons(results_poly, results_knn, project_folder):
     fig.savefig(figures_folder / "knn_validation_curve.png")
     plt.close(fig)
 
-    print("\nComparison tables saved in:", tables_folder)
-    print("Validation plots saved in:", figures_folder)
+    print("\nComparison tables saved in: tables/")
+    print("Validation plots saved in: figures/")
+
+def plot_feature_effects(model_poly, model_knn, X_train, project_folder):
+        # Use training-set means as the reference culture conditions.
+        reference = X_train.mean()
+
+        figures_folder = project_folder / "figures"
+        tables_folder = project_folder / "tables"
+        figures_folder.mkdir(exist_ok=True)
+        tables_folder.mkdir(exist_ok=True)
+
+        # Save the fixed reference conditions so the plots can be explained.
+        reference.rename("Reference value").to_csv(
+            tables_folder / "reference_conditions.csv",
+            index_label="Feature"
+        )
+
+        fig, axes = plt.subplots(
+            2, 2, figsize=(11, 8), dpi=200, layout="constrained"
+        )
+
+        effect_tables = []
+
+        for feature, ax in zip(X_train.columns, axes.flat):
+            # Vary one feature across its observed training range.
+            values = np.linspace(
+                X_train[feature].min(),
+                X_train[feature].max(),
+                100
+            )
+
+            # Build hypothetical samples with the other features held constant.
+            X_plot = pd.DataFrame(
+                np.tile(reference.to_numpy(), (len(values), 1)),
+                columns=X_train.columns
+            )
+            X_plot[feature] = values
+
+            # Predict using the fitted pipelines returned by grid search.
+            predictions_poly = model_poly.predict(X_plot)
+            predictions_knn = model_knn.predict(X_plot)
+
+            ax.plot(values, predictions_poly, label="Polynomial", color="tab:blue")
+            ax.plot(
+                values, predictions_knn,
+                label="KNN", color="tab:orange", linestyle="--"
+            )
+
+            # Show zero without hiding any negative model predictions.
+            ax.axhline(0, color="grey", linewidth=0.8, linestyle=":")
+            ax.set_xlabel(feature)
+            ax.set_ylabel("Predicted specific growth rate [d⁻¹]")
+            ax.legend()
+
+            # Save the conditions and predictions underlying each curve.
+            effect_table = X_plot.copy()
+            effect_table.insert(0, "Varied feature", feature)
+            effect_table["Polynomial prediction [d^-1]"] = predictions_poly
+            effect_table["KNN prediction [d^-1]"] = predictions_knn
+            effect_tables.append(effect_table)
+
+        fig.suptitle("Input effects with other features held at training means")
+        fig.savefig(figures_folder / "feature_effects.png")
+        plt.close(fig)
+
+        pd.concat(effect_tables, ignore_index=True).to_csv(
+            tables_folder / "feature_effects.csv", index=False
+        )
+
+        print("\nReference culture conditions:")
+        print(reference.to_string())
+        print("\nFeature-effect figure and tables saved.")
